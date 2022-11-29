@@ -1,10 +1,9 @@
 import requests
 import json
-import wget
 import os
 import time
-from tqdm import tqdm
 from argparse import ArgumentParser
+import os.path as osp
 
 
 def parse_args():
@@ -30,6 +29,20 @@ def parse_args():
         help="Directory to use to store files in.",
         default=".",
     )
+
+    parser.add_argument(
+        "-f", "--force", action="store_true", help="Overwrite files if already present."
+    )
+    parser.add_argument(
+        "-a", "--ask", action="store_true", help="Ask before overwriting."
+    )
+    parser.add_argument(
+        "-s",
+        "--skip",
+        action="store_true",
+        help="Skip downloading files if they already exist.",
+    )
+
     # parser.add_argument
 
     args = parser.parse_args()
@@ -45,8 +58,25 @@ def sizeof_fmt(num, suffix="B"):
     return f"{num:.1f}Yi{suffix}"
 
 
+def list_files(files):
+    for idx, target_file in enumerate(files):
+        key = target_file["key"]
+        link = target_file["links"]["self"]
+        print(f"{key:.<80}{sizeof_fmt(target_file['size']):.>10}")
+
+
+def fix_outfile_path(outfile):
+    path, of = osp.split(outfile)
+    of, ext = osp.splitext(of)
+    of = of + " (1)" + ext
+    outfile = osp.join(path, of)
+    return outfile
+
+
 if __name__ == "__main__":
     args = parse_args()
+    if not (args.list_files or args.download):
+        args.list_files = True
 
     url = "https://zenodo.org/api/records/"
     timeout = 20
@@ -55,8 +85,9 @@ if __name__ == "__main__":
     if "~" in args.output_dir:
         data_dir = os.path.expanduser(args.output_dir)
     else:
-        data_dir = args.output_dir
-    
+        data_dir = os.path.realpath(args.output_dir)
+
+    print(data_dir)
     os.makedirs(data_dir, exist_ok=True)
 
     try:
@@ -73,29 +104,66 @@ if __name__ == "__main__":
         total_size = sum([tgt["size"] for tgt in files])
         print(f"Total size: {sizeof_fmt(total_size)}")
         if args.list_files:
-            for idx, target_file in enumerate(files):
-                key = target_file["key"]
-                link = target_file["links"]["self"]
-                print(f"{key:.<80}{sizeof_fmt(target_file['size']):.>10}")
+            list_files(files)
 
         if args.download:
             for idx, target_file in enumerate(files):
+                download_file = False
                 key = target_file["key"]
                 link = target_file["links"]["self"]
-                print(key)
+                print("key:", key)
                 outfile = os.path.join(data_dir, key)
-                if not (os.path.exists(outfile)):
+                if os.path.exists(outfile):
+                    if args.force:
+                        print(f"File {outfile} exists. Replacing.")
+                        os.remove(outfile)
+                        download_file = True
+                    elif args.skip:
+                        print(f"Skipping file {outfile}.")
+                        download_file = False
+                    elif args.ask:
+                        answer = input(
+                            f"File {outfile} already exists. Replace? - y/n: "
+                        )
+
+                        while answer.lower() not in ["y", "n"]:
+                            answer = input(
+                                f"Answer {answer} not recognized. Replace? - y/n"
+                            )
+
+                        if answer == "n":
+                            print(f"Downloading copy of {outfile}.")
+                            outfile = fix_outfile_path(outfile)
+                            download_file = True
+                        elif answer == "y":
+                            download_file = True
+                            os.remove(outfile)
+                        else:
+                            raise ValueError(f"{answer} not recognized.")
+                else:
+                    download_file = True
+
+                if download_file:
                     try:
-                        wget.download(link, out=outfile)
-                    except Exception:
+                        dir_path, fname = osp.split(outfile)
+                        if dir_path:
+                            os.makedirs(osp.join(data_dir, dir_path), exist_ok=True)
+                        with open(outfile, "wb") as fp:
+                            response = requests.get(link, timeout=timeout)
+                            fp.write(response.content)
+                        # wget.download(link, out=outfile)
+                        print(
+                            f"\nDownloaded file {idx+1} of {num_files}. [{(idx+1)/num_files:.1f}%]\n"
+                        )
+                    except Exception as e:
+                        print(e)
                         print(f"{key}: Download error.")
                         time.sleep(5)
                 else:
-                    print(f"File {key} has already been downloaded. Skipping.")
+                    print(
+                        f"\nSkipped file {idx+1} of {num_files}. [{(idx+1)/num_files:.1f}%].\n"
+                    )
 
-                print(
-                    f"\nDownloaded file {idx+1} of {num_files}. [{(idx+1)/num_files:.1f}%]\n"
-                )
     else:
         raise requests.exceptions.RequestException("Request failed.")
 
